@@ -1,310 +1,514 @@
-#!/usr/bin/env python3
-"""Render the news-image-20261125 front page (1024x1024 PNG) with Pillow.
+"""The Daily Dispatch front page renderer, written from scratch.
 
-Local build tool only: the entry program (main.py) is standard library only
-and copies the committed entry.png, because the grader's sandbox is a
-python:3.13-slim container with no Pillow installed. This script runs on the
-build machine to produce entry.png from the verified stories below.
+Pure Python standard library. Draws a 1024x1024 newspaper front page
+summing up Wednesday 25 November 2026 into PNG bytes.
 
-Every figure was verified against a primary/authority source on 25 Nov 2026:
-Shenzhou-24 (Reuters/Xinhua/CMSA), markets (Reuters Trading Day), Riyadh
-(Reuters/Saudi Civil Defense), Hormuz/oil (Reuters), Australia (Reuters),
-Hasina (Reuters), Sarkozy/Zelenskiy (Reuters), UNAIDS (unaids.org).
-Dropped as unverifiable: the IRGC "three tankers hit mines" claim (Reuters
-could not verify it) and the "Indonesia VP resigns" item (that was 12 Nov).
+Layout: masthead, dateline, lead story (Shenzhou-24 / Pakistan's first
+astronaut), three mid stories (markets, Riyadh, the Gulf), two lower
+stories (Australia, Bangladesh), an IN BRIEF band and a footer. Every
+figure comes from the verified brief for 25 November 2026.
 """
 
-import hashlib
-import os
-import sys
-from PIL import Image, ImageDraw, ImageFont
+import struct
+import zlib
 
-W, H = 1024, 1024
-MARGIN = 30
-CW = W - 2 * MARGIN  # 964
+W = 1024
+H = 1024
 
-PAPER = (251, 249, 242)
-INK = (20, 20, 20)
-MUTED = (85, 85, 85)
-ACCENT = (140, 29, 24)      # dark red for kickers
-RULE = (20, 20, 20)
-BAR = (36, 66, 92)          # steel blue for chart bars
-BAR_HL = (140, 29, 24)      # NVDA bar in accent red
+PAPER = (245, 239, 223)
+INK = (25, 25, 25)
+RED = (158, 27, 30)
+NAVY = (23, 50, 77)
+BLUE = (43, 93, 138)
+SKY = (174, 205, 227)
+GRAY = (107, 98, 87)
+RULE = (185, 173, 151)
+WHITE = (255, 255, 255)
+FLAME = (232, 122, 36)
+GOLD = (214, 164, 65)
 
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-LIB_DIR = "/usr/share/fonts/truetype/liberation"
+# 5x7 pixel font, one row per string, "#" set, " " clear.
+FONT = {
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    "C": ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "G": ("01110", "10001", "10000", "10111", "10001", "10001", "01111"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "I": ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
+    "J": ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    "L": ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    "M": ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    "Q": ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "S": ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "V": ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    "W": ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
+    "X": ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    "Y": ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    "Z": ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    "2": ("01110", "10001", "00001", "00110", "01000", "10000", "11111"),
+    "3": ("11111", "00010", "00100", "00010", "00001", "10001", "01110"),
+    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
+    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
+    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
+    " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
+    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
+    ",": ("00000", "00000", "00000", "00000", "01100", "00100", "01000"),
+    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
+    ":": ("00000", "01100", "01100", "00000", "01100", "01100", "00000"),
+    ";": ("00000", "01100", "01100", "00000", "01100", "00100", "01000"),
+    "!": ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
+    "?": ("01110", "10001", "00001", "00110", "00100", "00000", "00100"),
+    "-": ("00000", "00000", "00000", "01110", "00000", "00000", "00000"),
+    "(": ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
+    ")": ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
+    "/": ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
+    "%": ("11001", "11010", "00010", "00100", "01000", "01011", "10011"),
+    "$": ("00100", "01111", "10100", "01110", "00101", "11110", "00100"),
+    "&": ("01100", "10010", "10100", "01000", "10101", "10010", "01101"),
+    '"': ("01010", "01010", "00000", "00000", "00000", "00000", "00000"),
+    "+": ("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
+    "=": ("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
+    "*": ("00000", "00100", "10101", "01110", "10101", "00100", "00000"),
+}
 
 
-def font(name, size, base=FONT_DIR):
-    return ImageFont.truetype(os.path.join(base, name), size)
+def text_width(text, scale):
+    """Width in pixels of text at the given scale (6 units per glyph)."""
+    if not text:
+        return 0
+    return len(text) * 6 * scale - scale
 
 
-F_SERIF_B = lambda s: font("DejaVuSerif-Bold.ttf", s)
-F_SERIF = lambda s: font("DejaVuSerif.ttf", s)
-F_SERIF_I = lambda s: font("LiberationSerif-Italic.ttf", s, LIB_DIR)
-F_SANS_B = lambda s: font("DejaVuSans-Bold.ttf", s)
-F_SANS = lambda s: font("DejaVuSans.ttf", s)
-
-
-def wrap(draw, text, fnt, max_w):
-    """Greedy word wrap by pixel width. Returns a list of lines."""
-    lines, cur = [], ""
-    for word in text.split(" "):
-        trial = (cur + " " + word).strip()
-        if draw.textlength(trial, font=fnt) <= max_w:
-            cur = trial
+def wrap_text(text, max_width, scale):
+    """Word-wrap text to lines no wider than max_width pixels."""
+    words = text.split(" ")
+    lines = []
+    current = ""
+    for word in words:
+        trial = word if not current else current + " " + word
+        if text_width(trial, scale) <= max_width:
+            current = trial
         else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
     return lines
 
 
-def draw_para(draw, x, y, text, fnt, max_w, leading, color=INK):
-    """Draw wrapped paragraph; return y after the last line."""
-    for line in wrap(draw, text, fnt, max_w):
-        draw.text((x, y), line, font=fnt, fill=color)
-        y += leading
-    return y
+class Canvas:
+    """An RGB raster with simple vector drawing helpers."""
+
+    def __init__(self, width, height, background):
+        self.width = width
+        self.height = height
+        self.buf = bytearray(background * (width * height))
+        self.clip = None
+
+    def set_clip(self, x0, y0, x1, y1):
+        self.clip = (x0, y0, x1, y1)
+
+    def clear_clip(self):
+        self.clip = None
+
+    def px(self, x, y, color):
+        if self.clip is not None:
+            cx0, cy0, cx1, cy1 = self.clip
+            if not (cx0 <= x < cx1 and cy0 <= y < cy1):
+                return
+        if 0 <= x < self.width and 0 <= y < self.height:
+            i = (y * self.width + x) * 3
+            self.buf[i] = color[0]
+            self.buf[i + 1] = color[1]
+            self.buf[i + 2] = color[2]
+
+    def rect(self, x, y, w, h, color):
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                self.px(xx, yy, color)
+
+    def hline(self, x, y, w, color, thick=1):
+        self.rect(x, y, w, thick, color)
+
+    def vline(self, x, y, h, color, thick=1):
+        self.rect(x, y, thick, h, color)
+
+    def line(self, x0, y0, x1, y1, color):
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            self.px(x0, y0, color)
+            if x0 == x1 and y0 == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x0 += sx
+            if e2 <= dx:
+                err += dx
+                y0 += sy
+
+    def triangle(self, x0, y0, x1, y1, x2, y2, color):
+        """Filled triangle by horizontal scanlines."""
+        pts = sorted([(x0, y0), (x1, y1), (x2, y2)], key=lambda p: p[1])
+        (ax, ay), (bx, by), (cx, cy) = pts
+        if ay == cy:
+            return
+        for yy in range(ay, cy + 1):
+            if yy < by:
+                xa = ax + (bx - ax) * (yy - ay) / (by - ay) if by != ay else ax
+                xb = ax + (cx - ax) * (yy - ay) / (cy - ay)
+            else:
+                xa = bx + (cx - bx) * (yy - by) / (cy - by) if cy != by else bx
+                xb = ax + (cx - ax) * (yy - ay) / (cy - ay)
+            lo, hi = (xa, xb) if xa <= xb else (xb, xa)
+            for xx in range(int(lo), int(hi) + 1):
+                self.px(xx, yy, color)
+
+    def disc(self, cx, cy, r, color):
+        for yy in range(cy - r, cy + r + 1):
+            for xx in range(cx - r, cx + r + 1):
+                if (xx - cx) * (xx - cx) + (yy - cy) * (yy - cy) <= r * r:
+                    self.px(xx, yy, color)
+
+    def ring(self, cx, cy, r, color, thick=2):
+        for yy in range(cy - r - thick, cy + r + thick + 1):
+            for xx in range(cx - r - thick, cx + r + thick + 1):
+                d2 = (xx - cx) * (xx - cx) + (yy - cy) * (yy - cy)
+                if (r - thick) * (r - thick) <= d2 <= (r + thick) * (r + thick):
+                    self.px(xx, yy, color)
+
+    def text(self, x, y, text, scale, color):
+        """Draw text; returns the x just past the last glyph."""
+        cx = x
+        for ch in text:
+            glyph = FONT.get(ch, FONT[" "])
+            for row in range(7):
+                bits = glyph[row]
+                for col in range(5):
+                    if bits[col] == "1":
+                        self.rect(cx + col * scale, y + row * scale,
+                                  scale, scale, color)
+            cx += 6 * scale
+        return cx
+
+    def text_center(self, cx, y, text, scale, color):
+        x = cx - text_width(text, scale) // 2
+        return self.text(x, y, text, scale, color)
+
+    def paragraph(self, x, y, text, max_width, scale, color, leading):
+        """Draw wrapped text; returns the y just past the last line."""
+        yy = y
+        for line in wrap_text(text, max_width, scale):
+            self.text(x, yy, line, scale, color)
+            yy += leading
+        return yy
 
 
-def draw_kicker(draw, x, y, text, fnt):
-    draw.text((x, y), text, font=fnt, fill=ACCENT)
-    return y + int(fnt.size * 1.5)
+def png_bytes(canvas):
+    """Encode the canvas as a deterministic PNG (filter 0, zlib level 6)."""
+    raw = bytearray()
+    stride = canvas.width * 3
+    for yy in range(canvas.height):
+        raw.append(0)
+        raw += canvas.buf[yy * stride:(yy + 1) * stride]
+    comp = zlib.compress(bytes(raw), 6)
+
+    def chunk(kind, data):
+        out = struct.pack(">I", len(data)) + kind + data
+        out += struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        return out
+
+    ihdr = struct.pack(">IIBBBBB", canvas.width, canvas.height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", comp) + chunk(b"IEND", b""))
 
 
-def hrule(draw, y, x0=MARGIN, x1=W - MARGIN, width=1):
-    draw.line([(x0, y), (x1, y)], fill=RULE, width=width)
-    return y + width
+# ---------------------------------------------------------------- pictures
+
+def draw_rocket(cv, x, y, w, h):
+    """Shenzhou capsule rocket on a night panel with stars and Earth."""
+    cv.rect(x, y, w, h, NAVY)
+    for sx, sy in ((12, 14), (44, 30), (w - 20, 12), (w - 46, 44),
+                   (24, 58), (w - 30, 70), (58, 10)):
+        cv.rect(x + sx, y + sy, 3, 3, WHITE)
+        cv.rect(x + sx + 1, y + sy - 3, 1, 9, WHITE)
+        cv.rect(x + sx - 3, y + sy + 1, 9, 1, WHITE)
+    cx = x + w // 2
+    # Earth arc along the bottom, clipped to the panel so it never
+    # spills over the stories below.
+    cv.set_clip(x, y, x + w, y + h)
+    cv.ring(cx, y + h + 150, 190, SKY, 3)
+    cv.disc(cx - 58, y + h - 26, 10, SKY)
+    cv.disc(cx + 64, y + h - 18, 7, SKY)
+    cv.clear_clip()
+    # Rocket body.
+    top = y + 22
+    body_w = 34
+    cv.triangle(cx, top - 16, cx - body_w // 2, top + 14,
+                cx + body_w // 2, top + 14, RED)
+    cv.rect(cx - body_w // 2, top + 14, body_w, 74, WHITE)
+    cv.rect(cx - body_w // 2, top + 14, body_w, 8, RED)
+    cv.disc(cx, top + 48, 9, BLUE)
+    cv.disc(cx, top + 48, 5, SKY)
+    cv.triangle(cx - body_w // 2, top + 88, cx - body_w // 2 - 16, top + 112,
+                cx - body_w // 2, top + 112, RED)
+    cv.triangle(cx + body_w // 2, top + 88, cx + body_w // 2 + 16, top + 112,
+                cx + body_w // 2, top + 112, RED)
+    cv.triangle(cx - 12, top + 112, cx + 12, top + 112, cx, top + 142, FLAME)
+    cv.triangle(cx - 6, top + 112, cx + 6, top + 112, cx, top + 128, GOLD)
 
 
-def vrule(draw, x, y0, y1, width=1):
-    draw.line([(x, y0), (x, y1)], fill=(150, 150, 150), width=width)
+def draw_chart(cv, x, y, w, h):
+    """Falling market line on white panel."""
+    cv.rect(x, y, w, h, WHITE)
+    cv.rect(x, y, w, h, RULE)
+    cv.rect(x + 2, y + 2, w - 4, h - 4, WHITE)
+    cv.hline(x + 10, y + h - 12, w - 20, GRAY, 2)
+    cv.vline(x + 10, y + 10, h - 22, GRAY, 2)
+    pts = [(x + 14, y + 22), (x + 34, y + 30), (x + 52, y + 26),
+           (x + 72, y + 44), (x + 90, y + 58), (x + w - 14, y + h - 24)]
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        cv.line(ax, ay, bx, by, RED)
+        cv.line(ax, ay + 1, bx, by + 1, RED)
+    ex, ey = pts[-1]
+    cv.triangle(ex, ey, ex - 10, ey - 2, ex - 2, ey + 8, RED)
 
 
-def draw_chart(draw, x, y, w):
-    """Horizontal bar chart of Tuesday's market moves. Returns bottom y."""
-    title = F_SANS_B(14)
-    draw.text((x, y), "TUESDAY'S MARKET REVERSAL", font=title, fill=INK)
-    y += 26
-    label_f = F_SANS_B(15)
-    val_f = F_SANS_B(15)
-    rows = [
-        ("NVDA", -6.0, BAR_HL),
-        ("NASDAQ", -1.5, BAR),
-        ("S&P 500", -0.5, BAR),
-        ("DOW", 0.9, BAR),
-    ]
-    bar_max = w - 152  # label (78) + gap + value text, so nothing clips right
-    scale = bar_max / 6.0
-    for name, val, color in rows:
-        draw.text((x, y), name, font=label_f, fill=INK)
-        bx = x + 78
-        bw = max(4, int(abs(val) * scale))
-        draw.rectangle([bx, y + 2, bx + bw, y + 22], fill=color)
-        sign = "+" if val >= 0 else ""
-        draw.text((bx + bw + 8, y), "%s%.1f%%" % (sign, val),
-                  font=val_f, fill=INK)
-        y += 34
-    foot = F_SANS(12)
-    y += 2
-    y = draw_para(draw, x, y,
-                  "One-day change, Tuesday 24 Nov 2026. Sources: Reuters.",
-                  foot, w, 16, color=MUTED)
-    return y
+def draw_tower(cv, x, y, w, h):
+    """Riyadh financial-district tower with a drone above it."""
+    cv.rect(x, y, w, h, WHITE)
+    cv.rect(x, y, w, h, RULE)
+    cv.rect(x + 2, y + 2, w - 4, h - 4, WHITE)
+    tx = x + w // 2
+    cv.rect(tx - 16, y + h - 58, 32, 58, NAVY)
+    cv.rect(tx - 11, y + h - 72, 22, 16, NAVY)
+    cv.rect(tx - 6, y + h - 84, 12, 14, NAVY)
+    cv.line(tx, y + h - 84, tx, y + 16, NAVY)
+    for wy in range(y + h - 52, y + h - 6, 9):
+        cv.rect(tx - 12, wy, 24, 3, SKY)
+    dx, dy = x + w - 30, y + 14
+    cv.rect(dx - 8, dy, 17, 3, INK)
+    cv.rect(dx - 2, dy - 2, 5, 7, INK)
+    cv.line(dx - 12, dy - 6, dx + 13, dy + 8, INK)
+    cv.line(dx + 13, dy - 6, dx - 12, dy + 8, INK)
 
 
-def main():
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
+def draw_barrel(cv, x, y, w, h):
+    """Oil barrel with a flame, on a white panel."""
+    cv.rect(x, y, w, h, WHITE)
+    cv.rect(x, y, w, h, RULE)
+    cv.rect(x + 2, y + 2, w - 4, h - 4, WHITE)
+    bx = x + w // 2 - 20
+    cv.rect(bx, y + 30, 40, 52, NAVY)
+    cv.rect(bx, y + 30, 40, 6, BLUE)
+    cv.rect(bx, y + 52, 40, 4, BLUE)
+    cv.rect(bx, y + 72, 40, 4, BLUE)
+    cv.triangle(bx + 20, y + 8, bx + 12, y + 26, bx + 28, y + 26, FLAME)
+    cv.triangle(bx + 20, y + 14, bx + 15, y + 26, bx + 25, y + 26, GOLD)
 
-    # Outer double border.
-    d.rectangle([10, 10, W - 11, H - 11], outline=RULE, width=2)
-    d.rectangle([16, 16, W - 17, H - 17], outline=RULE, width=1)
 
-    y = 32
-    # Dateline row.
-    dl = F_SANS_B(14)
-    d.text((MARGIN, y), "WEDNESDAY, 25 NOVEMBER 2026", font=dl, fill=INK)
-    right = "ONE PAGE · SIX STORIES"
-    d.text((W - MARGIN - d.textlength(right, font=dl), y), right,
-           font=dl, fill=INK)
-    y += 26
+def draw_parliament(cv, x, y, w, h):
+    """Parliament house front: roof triangle and columns."""
+    cv.rect(x, y, w, h, WHITE)
+    cv.rect(x, y, w, h, RULE)
+    cv.rect(x + 2, y + 2, w - 4, h - 4, WHITE)
+    cx = x + w // 2
+    cv.triangle(cx - 44, y + 34, cx + 44, y + 34, cx, y + 12, NAVY)
+    for i in range(5):
+        colx = cx - 40 + i * 20
+        cv.rect(colx, y + 38, 6, 34, NAVY)
+    cv.rect(cx - 46, y + 34, 92, 4, NAVY)
+    cv.rect(cx - 46, y + 72, 92, 5, NAVY)
+
+
+def draw_plane(cv, x, y, w, h):
+    """Airliner in flight, nose to the right."""
+    cv.rect(x, y, w, h, WHITE)
+    cv.rect(x, y, w, h, RULE)
+    cv.rect(x + 2, y + 2, w - 4, h - 4, WHITE)
+    cx, cy = x + w // 2, y + h // 2
+    cv.rect(cx - 52, cy - 5, 96, 10, NAVY)
+    cv.triangle(cx + 44, cy - 5, cx + 62, cy, cx + 44, cy + 5, NAVY)
+    cv.triangle(cx - 10, cy - 5, cx + 6, cy - 26, cx + 14, cy - 5, NAVY)
+    cv.triangle(cx - 2, cy + 5, cx + 10, cy + 22, cx + 16, cy + 5, NAVY)
+    cv.triangle(cx - 52, cy - 5, cx - 64, cy - 18, cx - 52, cy + 2, NAVY)
+    for wx in range(cx - 40, cx + 36, 12):
+        cv.rect(wx, cy - 2, 5, 4, SKY)
+
+
+# ---------------------------------------------------------------- content
+
+# Bottom edge of the drawn layout after the last render_page() call.
+LAST_Y = 0
+
+LEAD_HEADLINE = ("PAKISTAN'S FIRST", "ASTRONAUT IN ORBIT")
+LEAD_SUB = ("SHENZHOU-24 CARRIES MUHAMMAD ZEESHAN ALI TO CHINA'S "
+            "TIANGONG STATION, THE FIRST FOREIGN ASTRONAUT ABOARD. "
+            "HE WILL RUN FOUR PAKISTANI BIOTECH EXPERIMENTS.")
+LEAD_BODY = ("LONG MARCH-2F LIFTED OFF FROM JIUQUAN AT 08:18 LOCAL TIME "
+             "WITH COMMANDER TANG HONGBO, WU YI AND ALI, 40, A PAKISTANI "
+             "AIR FORCE PILOT. ALI WILL STAY FIVE TO TEN DAYS AND RETURN "
+             "ABOARD SHENZHOU-23.")
+
+MID_STORIES = [
+    ("MARKETS", "NVIDIA SLIDES 6% AS RALLY FADES",
+     "THE NASDAQ FELL 1.5% AND THE S&P 500 0.5% A DAY AFTER NVIDIA'S "
+     "31.5% SURGE. MICRON FELL 11% AND HPE 16% AS A U.S. TARIFF PROBE "
+     "REPORT WEIGHED ON CHIPMAKERS.", draw_chart),
+    ("RIYADH", "DRONE HITS RIYADH'S TALLEST TOWER",
+     "ELEVEN PEOPLE WERE WOUNDED IN THE SECOND STRIKE ON THE CAPITAL'S "
+     "FINANCIAL DISTRICT IN A WEEK. SAUDI-LED FORCES VOWED A FIRM "
+     "RESPONSE.", draw_tower),
+    ("THE GULF", "IRAN VOWS TO FIGHT SEA BLOCKADE",
+     "TEHRAN SAID IT WOULD USE ALL AVAILABLE MEANS AS THE STRAIT OF "
+     "HORMUZ STAYS SHUT. BRENT CRUDE EASED 43 CENTS TO $90.97 A "
+     "BARREL.", draw_barrel),
+]
+
+LOW_STORIES = [
+    ("AUSTRALIA", "CANBERRA APOLOGISES TO LGBTQ VETERANS",
+     "THE GOVERNMENT SAID SORRY IN PARLIAMENT FOR DECADES OF "
+     "DISCRIMINATION AGAINST GAY AND LESBIAN SERVICE MEMBERS.",
+     draw_parliament),
+    ("BANGLADESH", "HASINA PLANS RETURN ON 16 DECEMBER",
+     "THE FORMER PRIME MINISTER, 79, PLANS TO COME HOME FROM EXILE IN "
+     "INDIA ON VICTORY DAY. MINISTERS SAY SHE WILL BE ARRESTED.",
+     draw_plane),
+]
+
+IN_BRIEF = [
+    ("FRANCE", "SARKOZY AND WIFE CARLA BRUNI ORDERED TO TRIAL OVER "
+     "CORRUPTION."),
+    ("BALTIC", "KYIV SAYS IT HIT A RUSSIAN CARGO SHIP IN THE GULF OF "
+     "FINLAND."),
+    ("HEALTH", "AIDS DEATHS 570,000 IN 2025, A 20-YEAR LOW; FUNDS -18%."),
+]
+
+
+def render_page():
+    """Draw the whole front page and return deterministic PNG bytes."""
+    global LAST_Y
+    cv = Canvas(W, H, PAPER)
+    mx = 36
+    right = W - mx
+    inner = right - mx
+    y = 24
 
     # Masthead.
-    mast = F_SERIF_B(56)
-    name = "THE DAILY DISPATCH"
-    d.text(((W - d.textlength(name, font=mast)) / 2, y), name,
-           font=mast, fill=INK)
-    y += 70
-
-    # Tagline.
-    tag = F_SERIF_I(16)
-    tagline = ("A Pakistani flies to China's space station, Wall Street's "
-               "AI rally fades, and a drone hits Riyadh.")
-    d.text(((W - d.textlength(tagline, font=tag)) / 2, y), tagline,
-           font=tag, fill=MUTED)
-    y += 28
-    y = hrule(d, y, width=3)
-    y = hrule(d, y + 3, width=1)
+    cv.text_center(W // 2, y, "THE DAILY DISPATCH", 7, INK)
+    y += 56
+    cv.hline(mx, y, inner, INK, 2)
+    y += 8
+    cv.text(mx, y, "RABU, 25 NOVEMBER 2026", 2, INK)
+    cv.text(right - text_width("VOL. 1 - NO. 25", 2), y,
+            "VOL. 1 - NO. 25", 2, INK)
+    y += 20
+    cv.hline(mx, y, inner, INK, 5)
+    y += 4
+    cv.hline(mx, y, inner, INK, 2)
     y += 10
 
-    # ---- Lead story: Shenzhou-24 ----
-    lead_x, lead_w = MARGIN, 620
-    chart_x, chart_w = 680, W - MARGIN - 680
+    # Lead story: text left, rocket art right.
+    art_w = 300
+    art_h = 168
+    text_w = inner - art_w - 24
     ly = y
-    ly = draw_kicker(d, lead_x, ly, "SPACE · LEAD STORY", F_SANS_B(15))
-    ly = draw_para(d, lead_x, ly,
-                   "Pakistan reaches orbit on Shenzhou-24",
-                   F_SERIF_B(36), lead_w, 44)
+    cv.text(mx, ly, "SPACE", 2, RED)
+    ly += 20
+    for line in LEAD_HEADLINE:
+        cv.text(mx, ly, line, 5, INK)
+        ly += 38
+    ly += 4
+    ly = cv.paragraph(mx, ly, LEAD_SUB, text_w, 2, INK, 18)
     ly += 6
-    ly = draw_para(d, lead_x, ly,
-                   "Muhammad Zeeshan Ali becomes the first Pakistani in "
-                   "space — and the first foreign astronaut aboard China's "
-                   "station.",
-                   F_SERIF_I(18), lead_w, 24)
-    ly += 6
-    ly = draw_para(d, lead_x, ly,
-                   "China launched the Shenzhou-24 crewed spaceship on "
-                   "Wednesday, sending three astronauts to its Tiangong "
-                   "station aboard a Long March-2F rocket. Commander Tang "
-                   "Hongbo and flight engineer Wu Yi fly with Ali, 40, a "
-                   "Pakistan Air Force pilot who will work as a payload "
-                   "specialist for five to ten days, running four Pakistani "
-                   "biotech experiments.",
-                   F_SERIF(16), lead_w, 20)
-    chart_bottom = draw_chart(d, chart_x, y + 4, chart_w)
-    y = max(ly, chart_bottom) + 8
-    print("  after lead: y =", y)
-    y = hrule(d, y, width=1)
+    ly = cv.paragraph(mx, ly, LEAD_BODY, text_w, 2, GRAY, 17)
+    draw_rocket(cv, right - art_w, y + 16, art_w, art_h)
+    y = max(ly, y + 16 + art_h) + 10
+    cv.hline(mx, y, inner, RULE, 2)
     y += 8
 
-    # ---- Row 2: two columns ----
-    col_w = (CW - 20) // 2
-    row2_top = y
-    y2 = []
-    stories2 = [
-        (MARGIN, "MARKETS · THE REVERSAL",
-         "Nvidia's bounce fades a day after its 31% surge",
-         "Nvidia fell 6% on Tuesday and the Nasdaq lost 1.5% as the relief "
-         "rally around Jensen Huang's return fizzled. Selling worsened on a "
-         "report of new US tariffs on China, the EU and 14 other economies; "
-         "Anthropic slid below its $83 IPO price."),
-        (MARGIN + col_w + 20, "RIYADH · DRONE STRIKE",
-         "Houthi drone hits Riyadh's tallest tower, 11 hurt",
-         "A Houthi drone struck a tower in Riyadh's financial district on "
-         "Tuesday, wounding 11 people, Saudi Civil Defense said. It was the "
-         "second strike on the district in under a week; the Saudi-led "
-         "coalition vowed a decisive response."),
-    ]
-    for x, kick, head, body in stories2:
-        cy = row2_top
-        cy = draw_kicker(d, x, cy, kick, F_SANS_B(14))
-        cy = draw_para(d, x, cy, head, F_SERIF_B(28), col_w, 35)
+    # Three mid stories in columns.
+    gap = 24
+    col_w = (inner - 2 * gap) // 3
+    col_tops = []
+    for i, (kicker, head, body, art) in enumerate(MID_STORIES):
+        cx0 = mx + i * (col_w + gap)
+        cy = y
+        cv.text(cx0, cy, kicker, 2, RED)
+        cy += 20
+        for line in wrap_text(head, col_w, 3):
+            cv.text(cx0, cy, line, 3, INK)
+            cy += 24
         cy += 4
-        cy = draw_para(d, x, cy, body, F_SERIF(16), col_w, 20)
-        y2.append(cy)
-    vrule(d, MARGIN + col_w + 10, row2_top + 2, max(y2) - 4)
-    y = max(y2) + 8
-    print("  after row2: y =", y)
-    y = hrule(d, y, width=1)
+        art(cv, cx0, cy, col_w, 72)
+        cy += 72 + 8
+        cy = cv.paragraph(cx0, cy, body, col_w, 2, INK, 17)
+        col_tops.append(cy)
+    y = max(col_tops) + 8
+    cv.hline(mx, y, inner, RULE, 2)
     y += 8
 
-    # ---- Row 3: three columns ----
-    col3_w = (CW - 40) // 3
-    row3_top = y
-    y3 = []
-    stories3 = [
-        (MARGIN, "THE GULF",
-         "Iran vows to fight US blockade as oil slips",
-         "Iran will use \u201call available means\u201d against the US naval "
-         "blockade, its foreign ministry said. Brent fell 0.5% to $90.97 "
-         "on Wednesday; OPEC+ meets on 29 November."),
-        (MARGIN + col3_w + 20, "AUSTRALIA",
-         "Canberra apologises to LGBTQ veterans",
-         "Australia formally apologised on Wednesday to current and former "
-         "LGBTQ service members for decades of discriminatory policies. "
-         "Defence Minister Richard Marles delivered the apology in "
-         "parliament."),
-        (MARGIN + 2 * (col3_w + 20), "BANGLADESH",
-         "Hasina plans return home on 16 December",
-         "Ousted PM Sheikh Hasina plans to fly home from exile in India on "
-         "16 December, her spokesperson told Reuters. A minister said she "
-         "would be arrested; she faces a death sentence over the 2024 "
-         "crackdown."),
-    ]
-    for i, (x, kick, head, body) in enumerate(stories3):
-        cy = row3_top
-        cy = draw_kicker(d, x, cy, kick, F_SANS_B(13))
-        cy = draw_para(d, x, cy, head, F_SERIF_B(23), col3_w, 28)
+    # Two lower stories in columns.
+    col_w2 = (inner - gap) // 2
+    low_tops = []
+    for i, (kicker, head, body, art) in enumerate(LOW_STORIES):
+        cx0 = mx + i * (col_w2 + gap)
+        cy = y
+        cv.text(cx0, cy, kicker, 2, RED)
+        cy += 20
+        for line in wrap_text(head, col_w2, 3):
+            cv.text(cx0, cy, line, 3, INK)
+            cy += 24
         cy += 4
-        cy = draw_para(d, x, cy, body, F_SERIF(15), col3_w, 18)
-        y3.append(cy)
-    # Dividers after the loop, so both span the full column height.
-    vrule(d, MARGIN + col3_w + 10, row3_top + 2, max(y3) - 4)
-    vrule(d, MARGIN + 2 * col3_w + 30, row3_top + 2, max(y3) - 4)
-    y = max(y3) + 8
-    print("  after row3: y =", y)
-    y = hrule(d, y, width=1)
+        art(cv, cx0, cy, 150, 64)
+        cy2 = cv.paragraph(cx0 + 164, cy + 2, body, col_w2 - 164, 2, INK, 17)
+        low_tops.append(max(cy + 64, cy2))
+    y = max(low_tops) + 8
+    cv.hline(mx, y, inner, RULE, 2)
     y += 8
 
-    # ---- In brief ----
-    y = draw_kicker(d, MARGIN, y, "IN BRIEF", F_SANS_B(14))
-    briefs = [
-        ("FRANCE — ", "Sarkozy and wife Carla Bruni were ordered to trial "
-         "in a corruption case; a first hearing is set for 1 April 2027."),
-        ("BALTIC — ", "Zelensky confirmed Ukraine's drone strike on a "
-         "Russian cargo ship in the Gulf of Finland; Norway urged caution."),
-        ("HEALTH — ", "AIDS deaths fell to 570,000 in 2025, the lowest in "
-         "20+ years, but HIV funding fell 18%, UNAIDS said."),
-    ]
-    # Three briefs side by side, all starting at the same top y.
-    by = y
-    for i, (lead, text) in enumerate(briefs):
-        bx = MARGIN + i * (col3_w + 20)
-        bold = F_SERIF_B(14)
-        reg = F_SERIF(14)
-        full = lead + text
-        lines = wrap(d, full, reg, col3_w)
-        yy = y
-        for li, line in enumerate(lines):
-            if li == 0:
-                d.text((bx, yy), lead, font=bold, fill=INK)
-                d.text((bx + d.textlength(lead, font=bold), yy),
-                       line[len(lead):], font=reg, fill=INK)
-            else:
-                d.text((bx, yy), line, font=reg, fill=INK)
-            yy += 17
-        by = max(by, yy)
-    y = by + 6
-    print("  after briefs: y =", y)
-    y = hrule(d, y, width=1)
-    y += 6
+    # IN BRIEF band.
+    band_h = 104
+    cv.rect(mx, y, inner, band_h, NAVY)
+    cv.text(mx + 16, y + 12, "IN BRIEF", 2, GOLD)
+    bcol_w = (inner - 32 - 2 * gap) // 3
+    for i, (kicker, text) in enumerate(IN_BRIEF):
+        bx = mx + 16 + i * (bcol_w + gap)
+        cv.text(bx, y + 36, kicker, 2, GOLD)
+        cv.paragraph(bx, y + 52, text, bcol_w, 2, WHITE, 17)
+    y += band_h + 8
 
     # Footer.
-    foot = F_SANS(12)
-    left = ("Sources: Reuters, Xinhua, China Manned Space Agency, Saudi "
-            "Civil Defense, UNAIDS")
-    d.text((MARGIN, y), left, font=foot, fill=MUTED)
-    right = "Wednesday, 25 November 2026"
-    d.text((W - MARGIN - d.textlength(right, font=foot), y), right,
-           font=foot, fill=MUTED)
-    y += 18
-
-    print("layout: final y =", y, "of", H, "| bottom margin =", H - 18 - y)
-    if y > H - 18:
-        print("WARNING: content overflows the page", file=sys.stderr)
-
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    img.save(out, "PNG", optimize=True)
-    data = open(out, "rb").read()
-    print("wrote", out, "| bytes:", len(data),
-          "| sha256:", hashlib.sha256(data).hexdigest())
-    assert len(data) <= 1048576, "entry.png exceeds 1 MiB"
-    assert img.size == (1024, 1024)
-
-
-if __name__ == "__main__":
-    main()
+    cv.hline(mx, y, inner, INK, 2)
+    y += 6
+    cv.text_center(
+        W // 2, y,
+        "ALL FIGURES VERIFIED AGAINST PRIMARY SOURCES: REUTERS, XINHUA,",
+        2, GRAY)
+    y += 16
+    cv.text_center(
+        W // 2, y,
+        "SAUDI CIVIL DEFENSE, UNAIDS - THE DAILY DISPATCH",
+        2, GRAY)
+    LAST_Y = y + 16
+    return png_bytes(cv)
